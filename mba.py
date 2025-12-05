@@ -1,9 +1,20 @@
+# ============================================================
+# Online Retail II – Apriori, RFM Segmentation, Cross-Selling
+# (Optimized, Memory-Safe & With Cross-Sell Outputs)
+# ============================================================
+
 import pandas as pd
 import numpy as np
 from mlxtend.frequent_patterns import apriori, association_rules
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+
 
 df = pd.read_csv("online_retail_II.csv", encoding="ISO-8859-1")
 print("Raw shape:", df.shape)
+
+
 
 df = df.rename(columns={
     "Invoice": "Invoice",
@@ -12,7 +23,7 @@ df = df.rename(columns={
     "Quantity": "Quantity",
     "InvoiceDate": "InvoiceDate",
     "Price": "UnitPrice",
-    "Customer ID": "CustomerID",
+    "Customer ID": "CustomerID",   # FIXED
     "Country": "Country"
 })
 
@@ -23,17 +34,19 @@ df["CustomerID"] = df["CustomerID"].astype(str)
 df = df.dropna(subset=["InvoiceDate", "CustomerID"])
 df = df[df["Quantity"] > 0]
 df = df[df["UnitPrice"] > 0]
-df = df[~df["Invoice"].astype(str).str.startswith("C")]  # remove cancellations
+df = df[~df["Invoice"].astype(str).str.startswith("C")]
 
 print("After cleaning:", df.shape)
 
 
+# 4. APRIORI
 
-print("\n=== Building basket for Apriori (using subset + popular items) ===")
+
+print("\n=== Building basket for Apriori (filtered & optimized) ===")
+
 
 df_ap = df[df["Country"] == "United Kingdom"].copy()
 print("Rows after UK filter:", df_ap.shape[0])
-
 
 basket = (
     df_ap.groupby(["Invoice", "Description"])["Quantity"]
@@ -42,18 +55,17 @@ basket = (
          .fillna(0)
 )
 
-print("Raw basket shape (invoices x products):", basket.shape)
+print("Raw basket shape:", basket.shape)
 
-item_counts = (basket > 0).sum(axis=0)  
+
+item_counts = (basket > 0).sum(axis=0)
 popular_items = item_counts[item_counts >= 50].index
 basket = basket[popular_items]
 
 print("Basket shape after filtering popular items:", basket.shape)
 
 
-basket_sets = basket.gt(0)          
-basket_sets = basket_sets.astype(bool)
-
+basket_sets = basket.gt(0).astype(bool)
 print("Final basket_sets shape:", basket_sets.shape)
 
 
@@ -61,14 +73,14 @@ frequent_itemsets = apriori(
     basket_sets,
     min_support=0.02,   
     use_colnames=True,
-    max_len=2           
+    max_len=2
 )
 
 frequent_itemsets = frequent_itemsets.sort_values("support", ascending=False)
 print("\nTop frequent itemsets:")
 print(frequent_itemsets.head())
 
-
+# 4.6 RULE GENERATION
 rules = association_rules(
     frequent_itemsets,
     metric="lift",
@@ -82,10 +94,70 @@ print(
 )
 
 
-df["TotalPrice"] = df["Quantity"] * df["UnitPrice"]
+# 5. EXTRA: TOP CROSS-SELL RULE OUTPUTS
 
+
+print("\n=== TOP 20 CROSS-SELL RULES (by Lift) ===")
+top_rules = rules.head(20).copy()
+
+top_rules["antecedents"] = top_rules["antecedents"].apply(list)
+top_rules["consequents"] = top_rules["consequents"].apply(list)
+
+print(top_rules[["antecedents", "consequents", "support", "confidence", "lift"]])
+
+# ALL CROSS-SELL PAIRS
+print("\n=== ALL CROSS-SELL PAIRS ===")
+
+for idx, row in top_rules.iterrows():
+    a = ", ".join(row["antecedents"])
+    c = ", ".join(row["consequents"])
+    print(f"If customer buys: {a}  →  Recommend: {c}")
+
+# MOST COMMON CONSEQUENTS
+
+print("\n=== MOST COMMON CONSEQUENTS (Recommended Products) ===")
+
+cons_list = rules["consequents"].apply(list)
+cons_list = [item for sub in cons_list for item in sub]
+
+cons_freq = pd.Series(cons_list).value_counts().head(20)
+print(cons_freq)
+
+# MOST COMMON ANTECEDENTS
+print("\n=== MOST COMMON ANTECEDENTS (Trigger Products) ===")
+
+ant_list = rules["antecedents"].apply(list)
+ant_list = [item for sub in ant_list for item in sub]
+
+ant_freq = pd.Series(ant_list).value_counts().head(20)
+print(ant_freq)
+
+# 6. CROSS-SELL FUNCTION
+
+def recommend_for_product(product, rules_df, top_n=5):
+    mask = rules_df["antecedents"].apply(lambda x: product in list(x))
+    subset = rules_df[mask]
+
+    if subset.empty:
+        print(f"\n⚠ No rules found with '{product}' in antecedents.")
+        return pd.DataFrame()
+
+    subset = subset.sort_values("lift", ascending=False).copy()
+    subset["antecedents"] = subset["antecedents"].apply(list)
+    subset["consequents"] = subset["consequents"].apply(list)
+
+    return subset.head(top_n)[["antecedents", "consequents", "support", "confidence", "lift"]]
+
+
+# EXAMPLE: Choose ANY product from ant_freq index
+example_product = ant_freq.index[0]
+print(f"\n=== CROSS-SELL RECOMMENDATION FOR: {example_product} ===")
+print(recommend_for_product(example_product, rules))
+
+# RFM SEGMENTATION (on full dataset)
+
+df["TotalPrice"] = df["Quantity"] * df["UnitPrice"]
 snapshot_date = df["InvoiceDate"].max() + pd.Timedelta(days=1)
-print("\nSnapshot date:", snapshot_date)
 
 rfm = df.groupby("CustomerID").agg(
     Recency=("InvoiceDate", lambda x: (snapshot_date - x.max()).days),
@@ -93,16 +165,14 @@ rfm = df.groupby("CustomerID").agg(
     Monetary=("TotalPrice", "sum")
 )
 
-print("\nRFM sample:")
-print(rfm.head())
-
-r_q = rfm["Recency"].quantile([0.25, 0.5, 0.75]).to_dict()
-f_q = rfm["Frequency"].quantile([0.25, 0.5, 0.75]).to_dict()
-m_q = rfm["Monetary"].quantile([0.25, 0.5, 0.75]).to_dict()
+# --------- RFM scoring ---------
+r_q = rfm["Recency"].quantile([0.25, 0.50, 0.75]).to_dict()
+f_q = rfm["Frequency"].quantile([0.25, 0.50, 0.75]).to_dict()
+m_q = rfm["Monetary"].quantile([0.25, 0.50, 0.75]).to_dict()
 
 def r_score(x):
     if x <= r_q[0.25]: return 4
-    elif x <= r_q[0.5]: return 3
+    elif x <= r_q[0.50]: return 3
     elif x <= r_q[0.75]: return 2
     else: return 1
 
@@ -122,43 +192,12 @@ rfm["RFM_Score"] = (
     + rfm["M_Score"].astype(str)
 )
 
-def assign_segment(row):
-    if row["R_Score"] >= 3 and row["F_Score"] >= 3:
-        return "Champions"
-    elif row["F_Score"] >= 3:
-        return "Loyal"
-    elif row["R_Score"] == 1:
-        return "At Risk"
-    else:
-        return "Others"
-
-rfm["Segment"] = rfm.apply(assign_segment, axis=1)
-
-print("\nRFM with segments:")
+print("\n=== RFM SAMPLE ===")
 print(rfm.head())
-
-
-def recommend_for_product(product, rules_df, top_n=5):
-    mask = rules_df["antecedents"].apply(lambda x: product in list(x))
-    result = rules_df[mask].sort_values("lift", ascending=False)
-    if result.empty:
-        print(f"No rules found with '{product}' in antecedents.")
-        return result
-    result = result.copy()
-    result["antecedents"] = result["antecedents"].apply(lambda x: list(x))
-    result["consequents"] = result["consequents"].apply(lambda x: list(x))
-    return result.head(top_n)
-
-print("\nExample cross-sell recommendations:")
-try:
-    print(recommend_for_product("WHITE CHERRY LIGHTS", rules))
-except Exception as e:
-    print("Example product not found in rules or other error:", e)
-
 
 rfm.to_csv("rfm_segments.csv")
 rules.to_csv("association_rules.csv")
 frequent_itemsets.to_csv("frequent_itemsets.csv")
 
-print("\nSaved: rfm_segments.csv, association_rules.csv, frequent_itemsets.csv")
-print("Done.")
+print("\nSaved output files successfully!")
+
