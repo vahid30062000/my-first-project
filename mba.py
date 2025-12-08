@@ -8,7 +8,7 @@ import numpy as np
 from mlxtend.frequent_patterns import apriori, association_rules
 import matplotlib.pyplot as plt
 import seaborn as sns
-
+# import nagateja as nt
 
 
 df = pd.read_csv("online_retail_II.csv", encoding="ISO-8859-1")
